@@ -1,0 +1,15 @@
+services:
+  emlaunch:
+    build: .
+    image: emlaunch:latest
+    container_name: emlaunch-notebook
+    ports:
+      - "8888:8888"
+    volumes:
+      # Mount notebooks directory for live editing
+      - ./notebooks:/app/notebooks
+      # Optionally mount results directory
+      - ./results:/app/results
+    environment:
+      - JULIA_NUM_THREADS=auto
+    restart: unless-stopped

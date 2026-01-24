@@ -1,0 +1,36 @@
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/Manifest.toml
+
+# Documentation build
+docs/build/
+docs/site/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Results
+results/
+*.png
+*.pdf
+*.svg
+
+# Temporary files
+*.tmp
+*.log
+*.out

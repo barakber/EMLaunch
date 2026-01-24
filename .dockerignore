@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Julia
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+.julia/
+
+# Documentation build artifacts
+docs/build/
+
+# Test artifacts
+test/results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.log
