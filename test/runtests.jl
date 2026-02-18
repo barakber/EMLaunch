@@ -42,12 +42,24 @@ println()
             include("unit/test_physical_parameters.jl")
         end
 
+        @testset "Celestial Body" begin
+            include("unit/test_celestial_body.jl")
+        end
+
         @testset "Atmospheric Model" begin
             include("unit/test_atmosphere.jl")
         end
 
+        @testset "Vacuum Atmosphere" begin
+            include("unit/test_vacuum_atmosphere.jl")
+        end
+
         @testset "Gravity Model" begin
             include("unit/test_gravity.jl")
+        end
+
+        @testset "Lunar Gravity" begin
+            include("unit/test_lunar_gravity.jl")
         end
 
         @testset "Electromagnetic Acceleration" begin
@@ -125,6 +137,10 @@ println()
 
         @testset "Trajectory Optimization" begin
             include("scenarios/test_trajectory_optimization.jl")
+        end
+
+        @testset "Lunar Missions" begin
+            include("scenarios/test_lunar_missions.jl")
         end
     end
 

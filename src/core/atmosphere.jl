@@ -3,6 +3,8 @@
 
 Models atmospheric properties, drag forces, and aerodynamic heating
 using the US Standard Atmosphere 1976 model with type-safe units.
+Supports multiple celestial bodies via the `body` keyword argument.
+For vacuum bodies (e.g., Moon), all drag and heating functions return zero.
 
 ## Atmospheric Density
 
@@ -90,18 +92,29 @@ function get_layer_index(altitude)
     return 1  # Below lowest layer
 end
 
-"""
-    temperature(altitude)
+# =============================================================================
+# TEMPERATURE
+# =============================================================================
 
-Calculate atmospheric temperature at given altitude using US Standard Atmosphere 1976.
+"""
+    temperature(altitude; body=EARTH)
+
+Calculate atmospheric temperature at given altitude.
+
+For vacuum bodies, returns a constant 200 K (approximate surface equilibrium).
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Temperature [K]
 """
-function temperature(altitude)
+function temperature(altitude; body=EARTH)
+    if !has_atmosphere(body)
+        return 200.0u"K"
+    end
+
     idx = get_layer_index(altitude)
     h_base, T_base, _, lapse_rate = ATMOSPHERE_LAYERS[idx]
 
@@ -109,9 +122,7 @@ function temperature(altitude)
     T = T_base + lapse_rate * (altitude - h_base)
 
     # For extreme altitudes above 86 km, use constant temperature model
-    # Use the temperature at 86 km as the constant value to avoid discontinuity
     if altitude > 86000.0u"m"
-        # Calculate T at 86 km using the last layer
         T_86km = 214.65u"K" + (-0.002u"K/m") * (86000.0u"m" - 71000.0u"m")
         return max(T_86km, 50.0u"K")  # Minimum 50 K
     end
@@ -124,40 +135,47 @@ function temperature(altitude)
     return T
 end
 
-"""
-    pressure(altitude)
+# =============================================================================
+# PRESSURE
+# =============================================================================
 
-Calculate atmospheric pressure at given altitude using US Standard Atmosphere 1976.
+"""
+    pressure(altitude; body=EARTH)
+
+Calculate atmospheric pressure at given altitude.
+
+For vacuum bodies, returns 0 Pa.
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Pressure [Pa]
 """
-function pressure(altitude)
+function pressure(altitude; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0u"Pa"
+    end
+
     # Constants
     g = 9.80665u"m/s^2"
     M = 0.0289644u"kg/mol"  # Molar mass of air
     R = 8.31432u"J/(mol*K)"  # Universal gas constant
 
     # For extreme altitudes above 86 km, use exponential decay
-    # First calculate reference pressure at 86 km for continuity
     if altitude > 86000.0u"m"
-        # Calculate pressure at 86 km using the layer model
         h_86km = 86000.0u"m"
         idx_86 = get_layer_index(h_86km)
         h_base, T_base, P_base, lapse_rate = ATMOSPHERE_LAYERS[idx_86]
 
-        # Calculate P_86km
-        T_86 = temperature(h_86km)
+        T_86 = temperature(h_86km; body=body)
         if abs(ustrip(u"K/m", lapse_rate)) < 1e-10
             P_86km = P_base * exp(-g * M * (h_86km - h_base) / (R * T_base))
         else
             P_86km = P_base * (T_86 / T_base)^(-g * M / (R * lapse_rate))
         end
 
-        # Exponential decay above 86 km
         H_scale = 8500.0u"m"
         return P_86km * exp(-(altitude - 86000.0u"m") / H_scale)
     end
@@ -166,16 +184,12 @@ function pressure(altitude)
     h_base, T_base, P_base, lapse_rate = ATMOSPHERE_LAYERS[idx]
 
     if abs(ustrip(u"K/m", lapse_rate)) < 1e-10  # Isothermal layer
-        # Exponential model
         P = P_base * exp(-g * M * (altitude - h_base) / (R * T_base))
     else  # Temperature gradient
-        # Power law
-        T = temperature(altitude)  # Use the safe temperature function
-        # Ensure positive temperature ratio
+        T = temperature(altitude; body=body)
         if T > 0.0u"K" && T_base > 0.0u"K"
             P = P_base * (T / T_base)^(-g * M / (R * lapse_rate))
         else
-            # Fallback to exponential if temperature is problematic
             H_scale = 8500.0u"m"
             P = P_base * exp(-(altitude - h_base) / H_scale)
         end
@@ -184,31 +198,39 @@ function pressure(altitude)
     return P
 end
 
+# =============================================================================
+# DENSITY
+# =============================================================================
+
 """
-    density(altitude)
+    density(altitude; body=EARTH)
 
 Calculate atmospheric density at given altitude.
 
-Uses ideal gas law: ρ = P/(R_specific * T)
+For vacuum bodies, returns 0 kg/m³.
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Density [kg/m³]
 """
-function density(altitude)
-    P = pressure(altitude)
-    T = temperature(altitude)
+function density(altitude; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0u"kg/m^3"
+    end
+
+    P = pressure(altitude; body=body)
+    T = temperature(altitude; body=body)
     R_specific = 287.05u"J/(kg*K)"  # Specific gas constant for air
 
     ρ = P / (R_specific * T)
-    # Force unit simplification to kg/m³
     return uconvert(u"kg/m^3", ρ)
 end
 
 """
-    density_exponential(altitude, H_scale=8500.0u"m")
+    density_exponential(altitude, H_scale=8500.0u"m"; body=EARTH)
 
 Simplified exponential atmospheric density model.
 
@@ -216,63 +238,84 @@ Simplified exponential atmospheric density model.
 \\rho(h) = \\rho_0 \\exp(-h/H)
 ```
 
-Faster but less accurate than US Standard Atmosphere.
+For vacuum bodies, returns 0 kg/m³.
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
 - `H_scale`: Scale height [m] (default: 8500 m)
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Density [kg/m³]
 """
-function density_exponential(altitude, H_scale=8500.0u"m")
+function density_exponential(altitude, H_scale=8500.0u"m"; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0u"kg/m^3"
+    end
+
     ρ_0 = 1.225u"kg/m^3"
     return ρ_0 * exp(-altitude / H_scale)
 end
 
+# =============================================================================
+# SPEED OF SOUND / MACH NUMBER
+# =============================================================================
+
 """
-    speed_of_sound(altitude)
+    speed_of_sound(altitude; body=EARTH)
 
 Calculate speed of sound at given altitude.
 
-```math
-a = \\sqrt{\\gamma R T}
-```
+For vacuum bodies, returns NaN (undefined in vacuum).
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
-- Speed of sound [m/s]
+- Speed of sound [m/s] (NaN for vacuum)
 """
-function speed_of_sound(altitude)
-    T = temperature(altitude)
+function speed_of_sound(altitude; body=EARTH)
+    if !has_atmosphere(body)
+        return NaN * u"m/s"
+    end
+
+    T = temperature(altitude; body=body)
     γ = 1.4  # Specific heat ratio for air
     R = 287.05u"J/(kg*K)"
 
-    # Use NaNMath.sqrt to handle invalid values gracefully
-    # Returns NaN for negative arguments, allowing SDE solver to reject the step
     arg = γ * R * T
     a = NaNMath.sqrt(ustrip(u"m^2/s^2", arg)) * u"m/s"
     return a
 end
 
 """
-    mach_number(velocity, altitude)
+    mach_number(velocity, altitude; body=EARTH)
 
 Calculate Mach number at given velocity and altitude.
+
+For vacuum bodies, returns 0.0 (no meaningful Mach number).
 
 # Arguments
 - `velocity`: Velocity [m/s]
 - `altitude`: Altitude [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Mach number (dimensionless)
 """
-function mach_number(velocity, altitude)
-    a = speed_of_sound(altitude)
+function mach_number(velocity, altitude; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0
+    end
+
+    a = speed_of_sound(altitude; body=body)
     return ustrip(velocity / a)
 end
+
+# =============================================================================
+# DRAG COEFFICIENT
+# =============================================================================
 
 """
     drag_coefficient(mach, regime=:hypersonic)
@@ -304,20 +347,24 @@ function drag_coefficient(mach; regime=:auto)
     if regime == :subsonic
         return 0.40  # Streamlined body
     elseif regime == :transonic
-        # Drag rise in transonic regime
         return 0.40 + 0.45 * (mach - 0.8) / 0.4  # Linear interpolation
     elseif regime == :supersonic
-        # Modified Newtonian
         return 0.85
     else  # hypersonic
         return 0.90  # Slight increase at hypersonic speeds
     end
 end
 
+# =============================================================================
+# DRAG FORCE
+# =============================================================================
+
 """
-    drag_force(velocity, altitude, area, C_d=nothing)
+    drag_force(velocity, altitude, area, C_d=nothing; body=EARTH)
 
 Calculate aerodynamic drag force.
+
+For vacuum bodies, returns zero force.
 
 ```math
 F_d = \\frac{1}{2} \\rho v^2 C_d A
@@ -328,42 +375,53 @@ F_d = \\frac{1}{2} \\rho v^2 C_d A
 - `altitude`: Altitude [m]
 - `area`: Reference area [m²]
 - `C_d`: Drag coefficient (if nothing, auto-calculated from Mach)
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Drag force magnitude [N] (or vector if velocity is vector)
 """
-function drag_force(velocity, altitude, area, C_d=nothing)
-    ρ = density(altitude)
+function drag_force(velocity, altitude, area, C_d=nothing; body=EARTH)
+    if !has_atmosphere(body)
+        if isa(velocity, Number)
+            return 0.0u"N"
+        else
+            return SVector(0.0u"N", 0.0u"N", 0.0u"N")
+        end
+    end
+
+    ρ = density(altitude; body=body)
 
     # Calculate drag coefficient if not provided
     if isnothing(C_d)
         v_mag = isa(velocity, Number) ? velocity : norm(velocity)
-        M = mach_number(v_mag, altitude)
+        M = mach_number(v_mag, altitude; body=body)
         C_d = drag_coefficient(M)
     end
 
     # Drag force (always opposes velocity)
     if isa(velocity, Number)
-        # Scalar velocity
         F_d = 0.5 * ρ * velocity^2 * C_d * area
         return F_d
     else
-        # Vector velocity
         v_mag = norm(velocity)
-        # Handle zero velocity case to avoid NaN
         if v_mag < 1e-10u"m/s"
             return SVector(0.0u"N", 0.0u"N", 0.0u"N")
         end
         F_d_mag = 0.5 * ρ * v_mag^2 * C_d * area
-        # Return vector opposing velocity
         return -F_d_mag * velocity / v_mag
     end
 end
 
+# =============================================================================
+# AERODYNAMIC HEATING
+# =============================================================================
+
 """
-    aerodynamic_heating(velocity, altitude, nose_radius)
+    aerodynamic_heating(velocity, altitude, nose_radius; body=EARTH)
 
 Calculate stagnation point heating rate using Detra-Kemp-Riddell correlation.
+
+For vacuum bodies, returns zero heat flux.
 
 ```math
 \\dot{q} = K \\sqrt{\\frac{\\rho}{R_n}} v^3
@@ -373,15 +431,19 @@ Calculate stagnation point heating rate using Detra-Kemp-Riddell correlation.
 - `velocity`: Velocity [m/s]
 - `altitude`: Altitude [m]
 - `nose_radius`: Nose radius [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Heat flux [W/m²]
 """
-function aerodynamic_heating(velocity, altitude, nose_radius)
-    K = 1.83e-4u"kg^0.5/m"
-    ρ = density(altitude)
+function aerodynamic_heating(velocity, altitude, nose_radius; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0u"W/m^2"
+    end
 
-    # Handle vector velocity
+    K = 1.83e-4u"kg^0.5/m"
+    ρ = density(altitude; body=body)
+
     v = isa(velocity, Number) ? velocity : norm(velocity)
 
     q_dot = K * sqrt(ρ / nose_radius) * v^3
@@ -389,10 +451,16 @@ function aerodynamic_heating(velocity, altitude, nose_radius)
     return q_dot
 end
 
+# =============================================================================
+# REYNOLDS NUMBER
+# =============================================================================
+
 """
-    reynolds_number(velocity, altitude, length_scale)
+    reynolds_number(velocity, altitude, length_scale; body=EARTH)
 
 Calculate Reynolds number.
+
+For vacuum bodies, returns 0.0 (no meaningful Reynolds number).
 
 ```math
 Re = \\frac{\\rho v L}{\\mu}
@@ -402,13 +470,18 @@ Re = \\frac{\\rho v L}{\\mu}
 - `velocity`: Velocity [m/s]
 - `altitude`: Altitude [m]
 - `length_scale`: Characteristic length [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Reynolds number (dimensionless)
 """
-function reynolds_number(velocity, altitude, length_scale)
-    ρ = density(altitude)
-    T = temperature(altitude)
+function reynolds_number(velocity, altitude, length_scale; body=EARTH)
+    if !has_atmosphere(body)
+        return 0.0
+    end
+
+    ρ = density(altitude; body=body)
+    T = temperature(altitude; body=body)
 
     # Sutherland's formula for dynamic viscosity
     μ_ref = 1.789e-5u"Pa*s"
@@ -417,7 +490,6 @@ function reynolds_number(velocity, altitude, length_scale)
 
     μ = μ_ref * (T / T_ref)^1.5 * (T_ref + S) / (T + S)
 
-    # Handle vector velocity
     v = isa(velocity, Number) ? velocity : norm(velocity)
 
     Re = ρ * v * length_scale / μ
@@ -425,28 +497,44 @@ function reynolds_number(velocity, altitude, length_scale)
     return ustrip(Re)  # Dimensionless
 end
 
+# =============================================================================
+# DISPLAY
+# =============================================================================
+
 """
-    print_atmosphere_profile(altitudes)
+    print_atmosphere_profile(altitudes; body=EARTH)
 
 Print atmospheric properties at various altitudes.
 
 # Arguments
 - `altitudes`: Array of altitudes [m]
+- `body`: CelestialBody (default: EARTH)
 """
-function print_atmosphere_profile(altitudes)
+function print_atmosphere_profile(altitudes; body=EARTH)
     println("=" ^ 80)
-    println("ATMOSPHERIC PROFILE (US Standard Atmosphere 1976)")
+    if has_atmosphere(body)
+        println("ATMOSPHERIC PROFILE ($(body.name))")
+    else
+        println("ATMOSPHERIC PROFILE ($(body.name) - VACUUM)")
+    end
     println("=" ^ 80)
     println()
+
+    if !has_atmosphere(body)
+        println("  $(body.name) has no atmosphere. All values are zero/undefined.")
+        println("=" ^ 80)
+        return
+    end
+
     @printf("%-10s %-12s %-12s %-12s %-12s\n",
             "Alt [km]", "T [K]", "P [Pa]", "ρ [kg/m³]", "a [m/s]")
     println("-" ^ 80)
 
     for h in altitudes
-        T = temperature(h)
-        P = pressure(h)
-        ρ = density(h)
-        a = speed_of_sound(h)
+        T = temperature(h; body=body)
+        P = pressure(h; body=body)
+        ρ = density(h; body=body)
+        a = speed_of_sound(h; body=body)
 
         @printf("%-10.1f %-12.2f %-12.2f %-12.6f %-12.2f\n",
                 ustrip(u"km", h),

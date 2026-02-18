@@ -2,6 +2,7 @@
 # Simulation Module
 
 High-level simulation interface for mission scenarios.
+Supports multiple celestial bodies via the `body` keyword argument.
 
 Provides convenient functions for common mission types:
 - LEO cargo delivery
@@ -41,7 +42,8 @@ end
         payload_mass=20.0u"kg",
         target_altitude=400.0u"km",
         launcher_length=2000.0u"m",
-        n_coils=200
+        n_coils=200,
+        body=EARTH
     )
 
 Simulate LEO cargo delivery mission.
@@ -51,6 +53,7 @@ Simulate LEO cargo delivery mission.
 - `target_altitude`: Target orbital altitude [m]
 - `launcher_length`: Length of launcher tube [m]
 - `n_coils`: Number of acceleration coils
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Solution object from trajectory simulation
@@ -59,9 +62,9 @@ function mission_leo_cargo(;
     payload_mass=20.0u"kg",
     target_altitude=400.0u"km",
     launcher_length=2000.0u"m",
-    n_coils=200
+    n_coils=200,
+    body=EARTH
 )
-    # Create launcher configuration
     launcher = create_uniform_launcher(
         length = launcher_length,
         num_coils = n_coils,
@@ -72,10 +75,8 @@ function mission_leo_cargo(;
         gradient_per_coil = 0.002u"H/m"
     )
 
-    # Create payload
     payload = create_default_payload(mass=payload_mass)
 
-    # Create mission profile (Caesarea, Israel location)
     mission = MissionProfile(
         0.0u"m",                        # launch_altitude (sea level)
         32.5u"°",                       # launch_latitude (Caesarea)
@@ -83,16 +84,16 @@ function mission_leo_cargo(;
         90.0u"°",                       # launch_azimuth (East for max velocity boost)
         45.0u"°",                       # launch_elevation (45° standard)
         8000.0u"m/s",                  # target_velocity (orbital)
-        target_altitude                 # target_altitude
+        target_altitude,                # target_altitude
+        body                            # celestial body
     )
 
-    # Simulate
     sol = simulate_trajectory(
         launcher,
         payload,
         mission,
-        tspan = (0.0u"s", 300.0u"s"),  # 5 minutes
-        saveat = 0.1u"s"                # Save every 0.1 seconds
+        tspan = (0.0u"s", 300.0u"s"),
+        saveat = 0.1u"s"
     )
 
     return sol
@@ -103,7 +104,8 @@ end
         payload_mass=10.0u"kg",
         target_mach=6.0,
         launcher_length=1000.0u"m",
-        n_coils=100
+        n_coils=100,
+        body=EARTH
     )
 
 Simulate hypersonic test flight.
@@ -113,6 +115,7 @@ Simulate hypersonic test flight.
 - `target_mach`: Target Mach number
 - `launcher_length`: Length of launcher tube [m]
 - `n_coils`: Number of acceleration coils
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Solution object from trajectory simulation
@@ -121,13 +124,11 @@ function mission_hypersonic_test(;
     payload_mass=10.0u"kg",
     target_mach=6.0,
     launcher_length=1000.0u"m",
-    n_coils=100
+    n_coils=100,
+    body=EARTH
 )
-    # Target velocity (Mach 6 at 25km altitude)
-    # Speed of sound at 25km ≈ 300 m/s
     target_velocity = target_mach * 300.0u"m/s"
 
-    # Create launcher (smaller for hypersonic testing)
     launcher = create_uniform_launcher(
         length = launcher_length,
         num_coils = n_coils,
@@ -138,26 +139,24 @@ function mission_hypersonic_test(;
         gradient_per_coil = 0.002u"H/m"
     )
 
-    # Create payload
     payload = create_default_payload(mass=payload_mass)
 
-    # Create mission profile (shallower angle for sustained flight)
     mission = MissionProfile(
-        0.0u"m",                        # launch_altitude
-        32.5u"°",                       # launch_latitude (Caesarea)
-        34.9u"°",                       # launch_longitude
-        90.0u"°",                       # launch_azimuth
-        25.0u"°",                       # launch_elevation (shallower)
-        target_velocity,                # target_velocity
-        25.0u"km"                       # target_altitude (hypersonic corridor)
+        0.0u"m",
+        32.5u"°",
+        34.9u"°",
+        90.0u"°",
+        25.0u"°",
+        target_velocity,
+        25.0u"km",
+        body
     )
 
-    # Simulate
     sol = simulate_trajectory(
         launcher,
         payload,
         mission,
-        tspan = (0.0u"s", 120.0u"s"),  # 2 minutes
+        tspan = (0.0u"s", 120.0u"s"),
         saveat = 0.1u"s"
     )
 
@@ -169,7 +168,8 @@ end
         payload_mass=50.0u"kg",
         range=1000.0u"km",
         launcher_length=2000.0u"m",
-        n_coils=200
+        n_coils=200,
+        body=EARTH
     )
 
 Simulate suborbital point-to-point delivery.
@@ -179,6 +179,7 @@ Simulate suborbital point-to-point delivery.
 - `range`: Ground range to target [km]
 - `launcher_length`: Length of launcher tube [m]
 - `n_coils`: Number of acceleration coils
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Solution object from trajectory simulation
@@ -187,17 +188,12 @@ function mission_suborbital(;
     payload_mass=50.0u"kg",
     range=1000.0u"km",
     launcher_length=2000.0u"m",
-    n_coils=200
+    n_coils=200,
+    body=EARTH
 )
-    # Calculate required velocity and angle for range
-    # (Simplified ballistic trajectory)
-    # v² sin(2θ) / g = range
-    # Assume 45° for maximum range: v = sqrt(range * g)
-
-    g = 9.81u"m/s^2"
+    g = body.surface_gravity
     target_velocity = sqrt(range * g)
 
-    # Create launcher
     launcher = create_uniform_launcher(
         length = launcher_length,
         num_coils = n_coils,
@@ -208,26 +204,24 @@ function mission_suborbital(;
         gradient_per_coil = 0.002u"H/m"
     )
 
-    # Create payload
     payload = create_default_payload(mass=payload_mass)
 
-    # Create mission profile
     mission = MissionProfile(
-        0.0u"m",                        # launch_altitude
-        32.5u"°",                       # launch_latitude
-        34.9u"°",                       # launch_longitude
-        90.0u"°",                       # launch_azimuth
-        45.0u"°",                       # launch_elevation (optimal for range)
-        target_velocity,                # target_velocity
-        100.0u"km"                      # max altitude (approximate)
+        0.0u"m",
+        32.5u"°",
+        34.9u"°",
+        90.0u"°",
+        45.0u"°",
+        target_velocity,
+        100.0u"km",
+        body
     )
 
-    # Simulate
     sol = simulate_trajectory(
         launcher,
         payload,
         mission,
-        tspan = (0.0u"s", 600.0u"s"),  # 10 minutes
+        tspan = (0.0u"s", 600.0u"s"),
         saveat = 1.0u"s"
     )
 
@@ -235,28 +229,27 @@ function mission_suborbital(;
 end
 
 """
-    analyze_performance(sol, n_coils)
+    analyze_performance(sol, n_coils; body=EARTH)
 
 Analyze simulation results and extract performance metrics.
 
 # Arguments
 - `sol`: ODE solution from trajectory simulation
 - `n_coils`: Number of coils in launcher
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Dict with performance metrics
 """
-function analyze_performance(sol, n_coils)
-    # Extract trajectory data
-    traj = extract_trajectory_data(sol, n_coils)
+function analyze_performance(sol, n_coils; body=EARTH)
+    traj = extract_trajectory_data(sol, n_coils; body=body)
 
-    # Calculate metrics
     metrics = Dict(
         "final_velocity" => traj.speeds[end],
         "final_altitude" => traj.altitudes[end],
         "max_mach" => maximum(traj.mach_numbers),
         "max_temperature" => maximum(traj.temperatures),
-        "max_gload" => 0.0,  # Would need to calculate from accelerations
+        "max_gload" => 0.0,
         "flight_time" => traj.times[end],
         "apogee" => maximum(traj.altitudes)
     )
@@ -265,7 +258,7 @@ function analyze_performance(sol, n_coils)
 end
 
 """
-    print_mission_summary(sol, n_coils, mission_name="Mission")
+    print_mission_summary(sol, n_coils, mission_name="Mission"; body=EARTH)
 
 Print human-readable mission summary.
 
@@ -273,13 +266,14 @@ Print human-readable mission summary.
 - `sol`: Solution from trajectory simulation
 - `n_coils`: Number of coils
 - `mission_name`: Name of mission for display
+- `body`: CelestialBody (default: EARTH)
 """
-function print_mission_summary(sol, n_coils, mission_name="Mission")
-    metrics = analyze_performance(sol, n_coils)
-    traj = extract_trajectory_data(sol, n_coils)
+function print_mission_summary(sol, n_coils, mission_name="Mission"; body=EARTH)
+    metrics = analyze_performance(sol, n_coils; body=body)
+    traj = extract_trajectory_data(sol, n_coils; body=body)
 
     println("=" ^ 70)
-    println("$mission_name SUMMARY")
+    println("$mission_name SUMMARY ($(body.name))")
     println("=" ^ 70)
     println()
     println("FINAL STATE:")

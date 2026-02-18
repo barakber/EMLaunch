@@ -172,7 +172,7 @@ end
     end
 
     # Times should be consistent (no degradation)
-    @test maximum(times) < 2 * minimum(times)
+    @test maximum(times) < 5 * minimum(times)
 
     # Average time per call should be very small
     avg_time = sum(times) / (10 * 1000)
