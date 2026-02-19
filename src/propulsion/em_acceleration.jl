@@ -297,17 +297,24 @@ Voltage is applied at or after the trigger_time specified in coil_config.
 - Applied voltage [V]
 """
 function coil_voltage(x_or_t, coil_config::CoilConfig)
+    # The capacitors start fully charged (Q = C×V). The "voltage" here represents
+    # an external charging source that maintains the capacitor at its rated voltage.
+    # When triggered, the source is disconnected (V=0) allowing the cap to discharge
+    # through the coil's RLC circuit, generating current and EM force.
+    #   NOT triggered: V = V0 (maintain capacitor charge, switch open)
+    #   TRIGGERED:     V = 0  (disconnect supply, allow RLC discharge)
+
     # Check if this is time-based (has time dimension) or position-based
     if dimension(x_or_t) == dimension(1.0u"s")
         # Time-based triggering
         if x_or_t >= coil_config.trigger_time
-            return coil_config.voltage
+            return 0.0u"V"  # Triggered: allow capacitor discharge
         else
-            return 0.0u"V"
+            return coil_config.voltage  # Not yet triggered: maintain charge
         end
     else
         # Position-based triggering
-        # Trigger when projectile is within 100m ahead of coil (approaching)
+        # Trigger when projectile is within trigger_distance of the coil
         # This gives the coil time to build up current before projectile arrives
         trigger_distance = 100.0u"m"  # Lead distance for coil activation
 
@@ -317,18 +324,17 @@ function coil_voltage(x_or_t, coil_config::CoilConfig)
             coil_pos = ustrip(u"m", coil_config.position)
             trigger_dist = ustrip(u"m", trigger_distance)
 
-            # Trigger when projectile is within trigger_distance ahead of coil
             if x_or_t >= (coil_pos - trigger_dist) && x_or_t <= (coil_pos + trigger_dist)
-                return coil_config.voltage
+                return 0.0u"V"  # Triggered: allow capacitor discharge
             else
-                return 0.0u"V"
+                return coil_config.voltage  # Not triggered: maintain charge
             end
         else
             # Unitful position - compare directly
             if x_or_t >= (coil_config.position - trigger_distance) && x_or_t <= (coil_config.position + trigger_distance)
-                return coil_config.voltage
+                return 0.0u"V"  # Triggered: allow capacitor discharge
             else
-                return 0.0u"V"
+                return coil_config.voltage  # Not triggered: maintain charge
             end
         end
     end

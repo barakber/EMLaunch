@@ -128,17 +128,17 @@ end
         0.002u"H/m"
     )
 
-    # Before trigger
+    # Before trigger: external source maintains capacitor charge
     V_before = coil_voltage(0.3u"s", coil)
-    @test V_before == 0.0u"V"
+    @test V_before == 5000.0u"V"
 
-    # After trigger
+    # After trigger: source disconnected, capacitor discharges through RLC
     V_after = coil_voltage(0.6u"s", coil)
-    @test V_after == 5000.0u"V"
+    @test V_after == 0.0u"V"
 
-    # At trigger
+    # At trigger: discharge begins
     V_at = coil_voltage(0.5u"s", coil)
-    @test V_at == 5000.0u"V"
+    @test V_at == 0.0u"V"
 end
 
 @testset "Energy Calculations" begin
@@ -270,6 +270,412 @@ end
     # Energy units
     E = 0.5 * coil.capacitance * coil.voltage^2
     @test dimension(E) == dimension(1.0u"J")
+end
+
+# =============================================================================
+# COMPREHENSIVE COIL VOLTAGE TESTS
+# These tests guard against the critical coil_voltage inversion bug.
+# Physical invariant: V=V0 maintains capacitor charge (switch open),
+#                     V=0  allows RLC discharge (switch closed).
+# =============================================================================
+
+@testset "Coil Voltage — Semantic Invariant" begin
+    # The CRITICAL invariant: triggered coils must return 0V to allow
+    # capacitor discharge, untriggered must return V0 to maintain charge.
+    for V0 in [100.0, 2000.0, 5000.0, 18000.0] .* 1.0u"V"
+        coil = CoilConfig(50.0u"m", 0.001u"H", 0.01u"Ω", 1.0u"F", V0, 0.5u"s", 0.002u"H/m")
+
+        # Time-based: before trigger = V0 (maintain), after trigger = 0 (discharge)
+        @test coil_voltage(0.0u"s", coil) == V0    # Before trigger
+        @test coil_voltage(0.5u"s", coil) == 0.0u"V"  # At trigger
+        @test coil_voltage(1.0u"s", coil) == 0.0u"V"  # After trigger
+
+        # Position-based (unitful): within range = 0 (discharge), outside = V0
+        @test coil_voltage(50.0u"m", coil) == 0.0u"V"  # At coil (triggered)
+        @test coil_voltage(300.0u"m", coil) == V0       # Far away (not triggered)
+
+        # Position-based (dimensionless): same invariant
+        @test coil_voltage(50.0, coil) == 0.0u"V"   # At coil (triggered)
+        @test coil_voltage(300.0, coil) == V0        # Far away (not triggered)
+    end
+end
+
+@testset "Coil Voltage — Position-Based Trigger Boundaries" begin
+    # Coil at 200m, trigger_distance = 100m → active range [100m, 300m]
+    coil = CoilConfig(200.0u"m", 0.001u"H", 0.01u"Ω", 1.0u"F", 5000.0u"V", 0.0u"s", 0.002u"H/m")
+
+    # Unitful: outside trigger range → V0 (maintain charge)
+    @test coil_voltage(0.0u"m", coil) == 5000.0u"V"    # Way before
+    @test coil_voltage(99.0u"m", coil) == 5000.0u"V"    # Just before range
+    @test coil_voltage(301.0u"m", coil) == 5000.0u"V"   # Just past range
+    @test coil_voltage(500.0u"m", coil) == 5000.0u"V"   # Way past
+
+    # Unitful: inside trigger range → 0V (allow discharge)
+    @test coil_voltage(100.0u"m", coil) == 0.0u"V"   # At lower boundary
+    @test coil_voltage(150.0u"m", coil) == 0.0u"V"   # Approaching coil
+    @test coil_voltage(200.0u"m", coil) == 0.0u"V"   # At coil center
+    @test coil_voltage(250.0u"m", coil) == 0.0u"V"   # Past coil
+    @test coil_voltage(300.0u"m", coil) == 0.0u"V"   # At upper boundary
+
+    # Dimensionless: same boundaries
+    @test coil_voltage(99.0, coil) == 5000.0u"V"
+    @test coil_voltage(100.0, coil) == 0.0u"V"
+    @test coil_voltage(200.0, coil) == 0.0u"V"
+    @test coil_voltage(300.0, coil) == 0.0u"V"
+    @test coil_voltage(301.0, coil) == 5000.0u"V"
+end
+
+@testset "Coil Voltage — Time-Based Trigger Edge Cases" begin
+    # Multiple trigger times
+    for trigger_time in [0.0u"s", 0.1u"s", 1.0u"s", 10.0u"s"]
+        coil = CoilConfig(0.0u"m", 0.001u"H", 0.01u"Ω", 1.0u"F", 3000.0u"V", trigger_time, 0.002u"H/m")
+
+        if trigger_time > 0.0u"s"
+            # Before trigger: maintaining charge
+            @test coil_voltage(trigger_time - 0.001u"s", coil) == 3000.0u"V"
+        end
+        # At trigger: discharge begins
+        @test coil_voltage(trigger_time, coil) == 0.0u"V"
+        # After trigger: discharge continues
+        @test coil_voltage(trigger_time + 1.0u"s", coil) == 0.0u"V"
+    end
+end
+
+@testset "Coil Voltage — Sequential Triggering Along Launcher" begin
+    # Simulate a projectile moving through a 5-coil launcher
+    # Coils at 0m, 10m, 20m, 30m, 40m; trigger_distance = 100m
+    coils = [CoilConfig(i * 10.0u"m", 0.001u"H", 0.01u"Ω", 1.0u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m") for i in 0:4]
+
+    # At x=0: all coils within 100m trigger range (positions 0-40m)
+    for coil in coils
+        @test coil_voltage(0.0u"m", coil) == 0.0u"V"  # All triggered
+    end
+
+    # At x=200m: no coils within 100m range (all coils at 0-40m)
+    for coil in coils
+        @test coil_voltage(200.0u"m", coil) == 2000.0u"V"  # None triggered
+    end
+end
+
+@testset "Coil Voltage — Coil at Position Zero" begin
+    # Special case: first coil at position 0
+    coil = CoilConfig(0.0u"m", 0.001u"H", 0.01u"Ω", 0.2u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m")
+
+    # Projectile at launcher start (x=0): coil triggered
+    @test coil_voltage(0.0u"m", coil) == 0.0u"V"
+    @test coil_voltage(0.0, coil) == 0.0u"V"
+
+    # Projectile far away: coil not triggered
+    @test coil_voltage(200.0u"m", coil) == 2000.0u"V"
+    @test coil_voltage(200.0, coil) == 2000.0u"V"
+end
+
+# =============================================================================
+# RLC CIRCUIT DYNAMICS TESTS
+# Verifies that the circuit model produces correct current when triggered.
+# =============================================================================
+
+@testset "RLC Dynamics — Triggered Coil Produces Current" begin
+    # When a coil is triggered, V_applied=0 and Q/C=V0, so
+    # dI/dt = (0 - V0 - 0) / L = -V0/L (non-zero!)
+    for (V0, L, C) in [
+        (2000.0, 0.001, 0.2),   # Moon launcher
+        (5000.0, 0.001, 10.0),  # Standard launcher
+        (18000.0, 0.001, 2.5),  # High-power launcher
+    ]
+        coil = CoilConfig(50.0u"m", L*u"H", 0.01u"Ω", C*u"F", V0*u"V", 0.0u"s", 0.003u"H/m")
+        Q0 = coil.capacitance * coil.voltage   # Fully charged
+        I0 = 0.0u"A"
+
+        # Triggered: V_applied = 0
+        V_triggered = coil_voltage(50.0u"m", coil)
+        @test V_triggered == 0.0u"V"
+
+        dI_dt = (V_triggered - Q0 / coil.capacitance - coil.resistance * I0) / coil.inductance
+        @test abs(ustrip(u"A/s", dI_dt)) > 1e4  # Significant current change
+        @test ustrip(u"A/s", dI_dt) ≈ -V0 / L   # Exact: -V0/L
+    end
+end
+
+@testset "RLC Dynamics — Untriggered Coil Holds Charge" begin
+    # When not triggered, V_applied=V0 and Q/C=V0, so dI/dt = 0
+    coil = CoilConfig(50.0u"m", 0.001u"H", 0.01u"Ω", 0.2u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m")
+    Q0 = coil.capacitance * coil.voltage
+    I0 = 0.0u"A"
+
+    # Not triggered: V_applied = V0
+    V_untriggered = coil_voltage(500.0u"m", coil)  # Far from coil
+    @test V_untriggered == 2000.0u"V"
+
+    dI_dt = (V_untriggered - Q0 / coil.capacitance - coil.resistance * I0) / coil.inductance
+    @test ustrip(u"A/s", dI_dt) ≈ 0.0 atol=1e-10  # No current change
+end
+
+@testset "RLC Dynamics — Current Produces EM Force" begin
+    # After discharge begins, current builds → F = 0.5 * dL/dx * I² > 0
+    coil = CoilConfig(50.0u"m", 0.001u"H", 0.01u"Ω", 0.2u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m")
+
+    # Simulate one Euler step of RLC discharge
+    Q = coil.capacitance * coil.voltage  # 400 C
+    I = 0.0u"A"
+    dt = 1e-6u"s"  # 1 μs step
+
+    V = coil_voltage(50.0u"m", coil)  # Triggered: 0V
+    dI_dt = (V - Q / coil.capacitance - coil.resistance * I) / coil.inductance
+    I_new = I + dI_dt * dt
+    Q_new = Q + I * dt
+
+    @test abs(I_new) > 0.0u"A"  # Current has begun flowing
+
+    # After a few more steps, force should be significant
+    for _ in 1:100
+        V = coil_voltage(50.0u"m", coil)
+        dI_dt = (V - Q_new / coil.capacitance - coil.resistance * I_new) / coil.inductance
+        I_new = I_new + dI_dt * dt
+        Q_new = Q_new + I_new * dt
+    end
+
+    # Current should now be large enough for meaningful force
+    F = em_force(47.0u"m", I_new, coil)  # 3m before coil center
+    @test abs(ustrip(u"N", F)) > 1.0  # At least 1 N of force
+    @test F > 0.0u"N"  # Force should be in the forward direction
+end
+
+@testset "RLC Dynamics — Peak Current Estimate" begin
+    # For underdamped RLC: I_peak ≈ V0 * sqrt(C/L)
+    coil = CoilConfig(0.0u"m", 0.001u"H", 0.01u"Ω", 0.2u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m")
+
+    V0 = ustrip(u"V", coil.voltage)
+    L = ustrip(u"H", coil.inductance)
+    C = ustrip(u"F", coil.capacitance)
+    R = ustrip(u"Ω", coil.resistance)
+
+    I_peak_theory = V0 * sqrt(C / L)  # Underdamped approximation
+    @test I_peak_theory > 10000  # Should be thousands of amps
+
+    # Simulate RLC discharge and find peak |I|
+    Q = C * V0
+    I = 0.0
+    dt = 1e-6
+    I_max = 0.0
+
+    for _ in 1:200000  # 0.2s of simulation at 1μs steps
+        dI = (-Q / C - R * I) / L  # V=0 (triggered)
+        I += dI * dt
+        Q += I * dt
+        I_max = max(I_max, abs(I))
+    end
+
+    # Peak current should be within 20% of theoretical (damping reduces it)
+    @test I_max > 0.8 * I_peak_theory
+    @test I_max < 1.2 * I_peak_theory
+end
+
+@testset "RLC Dynamics — Energy Conservation" begin
+    # Total energy E = 0.5*L*I² + 0.5*Q²/C should decrease monotonically (resistive losses)
+    coil = CoilConfig(0.0u"m", 0.001u"H", 0.01u"Ω", 0.2u"F", 2000.0u"V", 0.0u"s", 0.003u"H/m")
+
+    V0 = ustrip(u"V", coil.voltage)
+    L = ustrip(u"H", coil.inductance)
+    C = ustrip(u"F", coil.capacitance)
+    R = ustrip(u"Ω", coil.resistance)
+
+    Q = C * V0
+    I = 0.0
+    dt = 1e-6
+
+    E_initial = 0.5 * Q^2 / C  # All energy in capacitor initially
+    E_prev = E_initial
+
+    energy_increased = false
+    for step in 1:100000
+        dI = (-Q / C - R * I) / L
+        I += dI * dt
+        Q += I * dt
+
+        E_current = 0.5 * L * I^2 + 0.5 * Q^2 / C
+
+        if E_current > E_prev + 1e-6 * E_initial  # Allow tiny numerical noise
+            energy_increased = true
+            break
+        end
+        E_prev = E_current
+    end
+
+    @test !energy_increased  # Energy must never increase (2nd law)
+    @test E_prev < E_initial  # Energy should be lost to resistance
+    @test E_prev > 0.1 * E_initial  # Significant energy remains after 0.1s
+end
+
+# =============================================================================
+# FULL ODE INTEGRATION TESTS
+# Verifies that trajectory_ode_dimensionless! actually accelerates the projectile.
+# =============================================================================
+
+@testset "ODE Produces Acceleration — Earth Launcher" begin
+    launcher = create_uniform_launcher(
+        length = 100.0u"m", num_coils = 5,
+        inductance_per_coil = 0.001u"H", resistance_per_coil = 0.01u"Ω",
+        capacitance_per_coil = 1.0u"F", voltage_per_coil = 5000.0u"V",
+        gradient_per_coil = 0.002u"H/m"
+    )
+    payload = PayloadConfig(10.0u"kg", π*(0.1u"m")^2, 0.05u"m", 0.9, 900.0u"J/(kg*K)", 288.15u"K", 2000.0u"K")
+    mission = MissionProfile(0.0u"m", 32.5u"°", 34.9u"°", 90.0u"°", 85.0u"°", 1000.0u"m/s", 50.0u"km")
+
+    u0_unitful = initial_state(launcher, payload, mission)
+    n_coils = launcher.num_coils
+    u0, units_ref = strip_units_state(u0_unitful, n_coils)
+    p = (launcher, payload, mission, units_ref)
+
+    # Evaluate derivative at t=0
+    du = zeros(length(u0))
+    trajectory_ode_dimensionless!(du, u0, p, 0.0)
+
+    # Velocity derivatives (du[4:6]) should be non-zero — gravity at minimum
+    accel_mag = sqrt(du[4]^2 + du[5]^2 + du[6]^2)
+    @test accel_mag > 1.0  # At least 1 m/s² (gravity alone is ~9.8)
+
+    # Current derivatives should be large for triggered coils
+    # (capacitors discharging through RLC)
+    max_dI = maximum(abs.(du[8:(7+n_coils)]))
+    @test max_dI > 1e4  # At least 10,000 A/s
+
+    # Run a few Euler steps and verify velocity increases
+    dt = 1e-5
+    u = copy(u0)
+    for _ in 1:1000  # 0.01s
+        trajectory_ode_dimensionless!(du, u, p, 0.0)
+        u .+= du * dt
+    end
+
+    v_after = sqrt(u[4]^2 + u[5]^2 + u[6]^2)
+    @test v_after > 10.0  # Projectile should have gained significant velocity
+end
+
+@testset "ODE Produces Acceleration — Moon Launcher" begin
+    launcher = create_uniform_launcher(
+        length = 500.0u"m", num_coils = 50,
+        inductance_per_coil = 0.001u"H", resistance_per_coil = 0.01u"Ω",
+        capacitance_per_coil = 0.2u"F", voltage_per_coil = 2000.0u"V",
+        gradient_per_coil = 0.003u"H/m", vacuum_pressure_ratio = 0.0001
+    )
+    payload = PayloadConfig(5.0u"kg", π*(0.05u"m")^2, 0.02u"m", 0.95, 900.0u"J/(kg*K)", 288.15u"K", 2500.0u"K")
+    mission = MissionProfile(0.0u"m", 26.3u"°", -47.5u"°", 90.0u"°", 88.0u"°", 1800.0u"m/s", 100.0u"km", MOON)
+
+    u0_unitful = initial_state(launcher, payload, mission)
+    n_coils = launcher.num_coils
+    u0, units_ref = strip_units_state(u0_unitful, n_coils)
+    p = (launcher, payload, mission, units_ref)
+
+    # Evaluate derivative at t=0
+    du = zeros(length(u0))
+    trajectory_ode_dimensionless!(du, u0, p, 0.0)
+
+    # Gravity on Moon: ~1.625 m/s²
+    accel_mag = sqrt(du[4]^2 + du[5]^2 + du[6]^2)
+    @test accel_mag > 1.0  # At least gravity
+
+    # Current derivatives must be non-zero for triggered coils
+    max_dI = maximum(abs.(du[8:(7+n_coils)]))
+    @test max_dI > 1e5  # V0/L = 2000/0.001 = 2e6
+
+    # Run Euler steps and verify velocity increases
+    dt = 1e-5
+    u = copy(u0)
+    for _ in 1:1000  # 0.01s
+        trajectory_ode_dimensionless!(du, u, p, 0.0)
+        u .+= du * dt
+    end
+
+    v_after = sqrt(u[4]^2 + u[5]^2 + u[6]^2)
+    @test v_after > 10.0  # Must gain speed (not just sit there!)
+end
+
+@testset "ODE Exit Velocity Is Physically Reasonable" begin
+    # Small test launcher: known energy, check exit velocity is in right ballpark
+    launcher = create_uniform_launcher(
+        length = 50.0u"m", num_coils = 5,
+        inductance_per_coil = 0.001u"H", resistance_per_coil = 0.01u"Ω",
+        capacitance_per_coil = 0.5u"F", voltage_per_coil = 1000.0u"V",
+        gradient_per_coil = 0.003u"H/m"
+    )
+    payload = PayloadConfig(5.0u"kg", π*(0.05u"m")^2, 0.02u"m", 0.9, 900.0u"J/(kg*K)", 288.15u"K", 2000.0u"K")
+    mission = MissionProfile(0.0u"m", 0.0u"°", 0.0u"°", 90.0u"°", 85.0u"°", 500.0u"m/s", 10.0u"km")
+
+    # Total stored energy
+    E_stored = sum(0.5 * c.capacitance * c.voltage^2 for c in launcher.coils)
+    E_stored_J = ustrip(u"J", E_stored)
+    m = ustrip(u"kg", payload.mass)
+
+    # Theoretical max exit velocity (100% efficiency, no gravity)
+    v_max = sqrt(2 * E_stored_J / m)
+    @test v_max > 0.0  # Sanity
+
+    # Run ODE simulation
+    u0_unitful = initial_state(launcher, payload, mission)
+    n_coils = launcher.num_coils
+    u0, units_ref = strip_units_state(u0_unitful, n_coils)
+    p = (launcher, payload, mission, units_ref)
+
+    du = zeros(length(u0))
+    dt = 1e-6
+    u = copy(u0)
+
+    # Simulate until projectile exits launcher or 1s elapsed
+    launch_pos = u[1:3]
+    for step in 1:1000000
+        trajectory_ode_dimensionless!(du, u, p, step * dt)
+        u .+= du * dt
+
+        x_launcher = sqrt(sum((u[1:3] .- launch_pos).^2))
+        if x_launcher > ustrip(u"m", launcher.length)
+            break
+        end
+    end
+
+    v_exit = sqrt(u[4]^2 + u[5]^2 + u[6]^2)
+
+    # Exit velocity must be positive and less than theoretical max
+    @test v_exit > 1.0   # Must have some velocity
+    @test v_exit < v_max  # Can't exceed energy limit
+end
+
+@testset "Altitude Stays Positive After Launch — Moon" begin
+    # The original bug: Moon trajectories going to negative altitude.
+    # This test ensures the projectile gains altitude after EM acceleration.
+    launcher = create_uniform_launcher(
+        length = 500.0u"m", num_coils = 50,
+        inductance_per_coil = 0.001u"H", resistance_per_coil = 0.01u"Ω",
+        capacitance_per_coil = 0.2u"F", voltage_per_coil = 2000.0u"V",
+        gradient_per_coil = 0.003u"H/m", vacuum_pressure_ratio = 0.0001
+    )
+    payload = PayloadConfig(5.0u"kg", π*(0.05u"m")^2, 0.02u"m", 0.95, 900.0u"J/(kg*K)", 288.15u"K", 2500.0u"K")
+    mission = MissionProfile(0.0u"m", 26.3u"°", -47.5u"°", 90.0u"°", 88.0u"°", 1800.0u"m/s", 100.0u"km", MOON)
+
+    u0_unitful = initial_state(launcher, payload, mission)
+    n_coils = launcher.num_coils
+    u0, units_ref = strip_units_state(u0_unitful, n_coils)
+    p = (launcher, payload, mission, units_ref)
+
+    du = zeros(length(u0))
+    dt = 1e-5
+    u = copy(u0)
+
+    # Simulate 0.1s (enough for initial acceleration phase)
+    for _ in 1:10000
+        trajectory_ode_dimensionless!(du, u, p, 0.0)
+        u .+= du * dt
+    end
+
+    # Compute altitude: distance from Moon center minus Moon radius
+    r = sqrt(u[1]^2 + u[2]^2 + u[3]^2)
+    R_moon = ustrip(u"m", MOON.radius)
+    altitude = r - R_moon
+
+    @test altitude >= -1.0  # Must not go significantly below surface
+    # After 0.1s of EM acceleration, should have positive upward velocity
+    v_mag = sqrt(u[4]^2 + u[5]^2 + u[6]^2)
+    @test v_mag > 50.0  # Must have gained substantial velocity
 end
 
 println("  ✓ EM acceleration tests passed")

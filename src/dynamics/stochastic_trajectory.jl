@@ -206,13 +206,14 @@ Named tuple with:
 """
 function monte_carlo_analysis(
     launcher, payload, mission, n_runs=100;
-    noise_params=default_noise_parameters()
+    noise_params=default_noise_parameters(),
+    tspan=(0.0u"s", 10.0u"s")
 )
     @info "Running Monte Carlo analysis" n_runs=n_runs
     @info "Noise parameters" atmospheric="±$(noise_params.atmospheric_noise*100)%" drag="±$(noise_params.drag_noise*100)%" current="±$(noise_params.current_noise*100)%" timing="±$(noise_params.timing_noise)" mass="±$(noise_params.mass_noise*100)%"
 
     # Create SDE problem
-    prob = create_sde_problem(launcher, payload, mission, noise_params)
+    prob = create_sde_problem(launcher, payload, mission, noise_params; tspan=tspan)
 
     # Create ensemble problem for Monte Carlo
     ensemble_prob = EnsembleProblem(prob)
