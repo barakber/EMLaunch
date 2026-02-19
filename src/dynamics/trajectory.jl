@@ -2,11 +2,12 @@
 # Trajectory Module
 
 Complete system of ODEs for electromagnetic launch trajectory simulation.
+Supports multiple celestial bodies via `CelestialBody` parameterization.
 
 Combines all physics:
 - Electromagnetic acceleration
-- Atmospheric drag
-- Aerodynamic heating
+- Atmospheric drag (zero for vacuum bodies)
+- Aerodynamic heating (zero for vacuum bodies)
 - Gravitational forces (including J2)
 
 ## State Vector
@@ -91,6 +92,7 @@ Defines the mission parameters and launch conditions.
 - `launch_elevation`: Launch elevation angle [degrees] (0=horizontal, 90=vertical)
 - `target_velocity`: Target final velocity [m/s]
 - `target_altitude`: Target final altitude (if orbital) [m]
+- `body`: CelestialBody for this mission (default: EARTH)
 """
 struct MissionProfile
     launch_altitude
@@ -100,7 +102,11 @@ struct MissionProfile
     launch_elevation
     target_velocity
     target_altitude
+    body::CelestialBody
 end
+
+# Backward-compatible 7-arg constructor (defaults to EARTH)
+MissionProfile(alt, lat, lon, az, el, v, h) = MissionProfile(alt, lat, lon, az, el, v, h, EARTH)
 
 """
     initial_state(launcher_config, payload_config, mission_profile)
@@ -119,7 +125,8 @@ function initial_state(
     pos_0 = position_from_altitude_angle(
         mission_profile.launch_altitude,
         mission_profile.launch_latitude,
-        mission_profile.launch_longitude
+        mission_profile.launch_longitude;
+        body=mission_profile.body
     )
 
     # Initial velocity (zero - starting from rest)
@@ -136,7 +143,6 @@ function initial_state(
     Q_0 = [coil.capacitance * coil.voltage for coil in launcher_config.coils]
 
     # Combine into state vector
-    # Note: In Julia with Unitful, we need to carefully handle arrays
     state = vcat(
         collect(pos_0),      # [x, y, z]
         collect(vel_0),      # [vₓ, vᵧ, vᵤ]
@@ -266,10 +272,7 @@ Calculate launch direction vector in ECI frame.
 - Unit direction vector in ECI frame
 """
 function launch_direction(azimuth, elevation, position)
-    # Simplified: assume launch direction in local tangent plane
-    # More sophisticated: transform from local NEU to ECI
-
-    # Local up direction (radial from Earth center)
+    # Local up direction (radial from body center)
     r_hat = position / norm(position)
 
     # Local north (simplified - in xy plane perpendicular to r_hat)
@@ -300,6 +303,7 @@ Works with Float64 arrays (no units) for compatibility with DifferentialEquation
 function trajectory_ode_dimensionless!(du, u, p, t)
     launcher_config, payload_config, mission_profile, units_ref = p
     n_coils = launcher_config.num_coils
+    body = mission_profile.body
 
     # Reattach units to state for physics calculations
     pos = SVector(u[1], u[2], u[3]) * units_ref.L
@@ -309,25 +313,22 @@ function trajectory_ode_dimensionless!(du, u, p, t)
     charges = u[(8+n_coils):(7+2*n_coils)] * units_ref.Q
 
     # Calculate altitude
-    h = altitude_from_position(pos)
+    h = altitude_from_position(pos; body=body)
 
     # =================================================================
     # ELECTROMAGNETIC FORCE
     # =================================================================
-    # Project position onto launcher axis to get "x" coordinate
-    # (Simplified: use distance from launch site)
     launch_pos = position_from_altitude_angle(
         mission_profile.launch_altitude,
         mission_profile.launch_latitude,
-        mission_profile.launch_longitude
+        mission_profile.launch_longitude;
+        body=body
     )
-    x_launcher = norm(pos - launch_pos)  # Position along launcher
+    x_launcher = norm(pos - launch_pos)
 
-    # Only apply EM force if inside launcher tube
     if x_launcher < launcher_config.length
         F_em_mag = total_em_force(x_launcher, currents, launcher_config)
 
-        # Direction along launcher axis (simplified: radially outward)
         launch_dir = launch_direction(
             ustrip(u"rad", mission_profile.launch_azimuth),
             ustrip(u"rad", mission_profile.launch_elevation),
@@ -335,21 +336,17 @@ function trajectory_ode_dimensionless!(du, u, p, t)
         )
         F_em = F_em_mag * launch_dir
     else
-        # Outside launcher - no EM force
         F_em = SVector(0.0u"N", 0.0u"N", 0.0u"N")
     end
 
     # =================================================================
     # DRAG FORCE (with vacuum tube support)
     # =================================================================
-    if h < 100.0u"km"  # Only calculate drag in atmosphere
-        # Apply vacuum reduction if inside launcher tube
+    if has_atmosphere(body) && h < 100.0u"km"
         if x_launcher < launcher_config.length
-            # Inside tube - reduce drag by vacuum_pressure_ratio
-            F_drag_vec = drag_force(vel, h, payload_config.area) * launcher_config.vacuum_pressure_ratio
+            F_drag_vec = drag_force(vel, h, payload_config.area; body=body) * launcher_config.vacuum_pressure_ratio
         else
-            # Outside tube - normal atmospheric drag
-            F_drag_vec = drag_force(vel, h, payload_config.area)
+            F_drag_vec = drag_force(vel, h, payload_config.area; body=body)
         end
     else
         F_drag_vec = SVector(0.0u"N", 0.0u"N", 0.0u"N")
@@ -358,7 +355,7 @@ function trajectory_ode_dimensionless!(du, u, p, t)
     # =================================================================
     # GRAVITATIONAL FORCE
     # =================================================================
-    a_grav = gravity_with_J2(pos)
+    a_grav = gravity_with_J2(pos; body=body)
     F_grav = payload_config.mass * a_grav
 
     # =================================================================
@@ -370,24 +367,19 @@ function trajectory_ode_dimensionless!(du, u, p, t)
     # =================================================================
     # THERMAL HEATING (with vacuum tube support)
     # =================================================================
-    if h < 100.0u"km"  # Only heat in atmosphere
-        # Apply vacuum reduction if inside launcher tube
+    if has_atmosphere(body) && h < 100.0u"km"
         if x_launcher < launcher_config.length
-            q_dot = aerodynamic_heating(vel, h, payload_config.nose_radius) * launcher_config.vacuum_pressure_ratio
+            q_dot = aerodynamic_heating(vel, h, payload_config.nose_radius; body=body) * launcher_config.vacuum_pressure_ratio
         else
-            q_dot = aerodynamic_heating(vel, h, payload_config.nose_radius)
+            q_dot = aerodynamic_heating(vel, h, payload_config.nose_radius; body=body)
         end
 
-        # Radiative cooling (Stefan-Boltzmann)
         σ = 5.670374419e-8u"W/(m^2*K^4)"
         T_amb = 250.0u"K"
         q_radiation = payload_config.emissivity * σ * payload_config.area *
                       (T^4 - T_amb^4)
 
-        # Net heating rate
         q_net = q_dot * payload_config.area - q_radiation
-
-        # Temperature rate
         dT_dt = q_net / (payload_config.mass * payload_config.specific_heat)
     else
         dT_dt = 0.0u"K/s"
@@ -399,46 +391,34 @@ function trajectory_ode_dimensionless!(du, u, p, t)
     dI_dt = zeros(n_coils) * 1.0u"A/s"
     dQ_dt = zeros(n_coils) * 1.0u"C/s"
 
-    # Use x_launcher (computed above) for coil triggering
-    # x_launcher = distance traveled from launch site (0 to 4000m)
-
     for i in 1:n_coils
         coil = launcher_config.coils[i]
         I = currents[i]
         Q = charges[i]
 
-        # Applied voltage (triggered based on projectile position along launcher)
         V = coil_voltage(x_launcher, coil)
 
-        # Circuit equation: L dI/dt = V - Q/C - RI
         dI_dt[i] = (V - Q / coil.capacitance - coil.resistance * I) / coil.inductance
-
-        # Charge rate
         dQ_dt[i] = I
     end
 
     # =================================================================
     # ASSEMBLE DERIVATIVE VECTOR (strip units)
     # =================================================================
-    # Position derivatives = velocity (m/s)
     for i in 1:3
         du[i] = ustrip(u"m/s", vel[i])
     end
 
-    # Velocity derivatives = acceleration (m/s²)
     for i in 1:3
         du[3+i] = ustrip(u"m/s^2", a_total[i])
     end
 
-    # Temperature derivative (K/s)
     du[7] = ustrip(u"K/s", dT_dt)
 
-    # Current derivatives (A/s)
     for i in 1:n_coils
         du[7+i] = ustrip(u"A/s", dI_dt[i])
     end
 
-    # Charge derivatives (C/s = A)
     for i in 1:n_coils
         du[7+n_coils+i] = ustrip(u"A", dQ_dt[i])
     end
@@ -503,7 +483,7 @@ function simulate_trajectory(
 end
 
 """
-    extract_trajectory_data(sol, n_coils, units_ref=nothing)
+    extract_trajectory_data(sol, n_coils, units_ref=nothing; body=EARTH)
 
 Extract human-readable trajectory data from solution.
 
@@ -511,11 +491,12 @@ Extract human-readable trajectory data from solution.
 - `sol`: ODE solution (dimensionless)
 - `n_coils`: Number of coils
 - `units_ref`: Optional units reference for reattaching units
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 Named tuple with time series of key variables
 """
-function extract_trajectory_data(sol, n_coils, units_ref=nothing)
+function extract_trajectory_data(sol, n_coils, units_ref=nothing; body=EARTH)
     # Define default units if not provided
     if isnothing(units_ref)
         units_ref = (
@@ -535,9 +516,9 @@ function extract_trajectory_data(sol, n_coils, units_ref=nothing)
     temperatures = [sol[7,i] * units_ref.T for i in 1:length(times)]
 
     # Derived quantities
-    altitudes = [altitude_from_position(pos) for pos in positions]
+    altitudes = [altitude_from_position(pos; body=body) for pos in positions]
     speeds = [norm(vel) for vel in velocities]
-    mach_numbers = [mach_number(speeds[i], altitudes[i]) for i in 1:length(times)]
+    mach_numbers = [mach_number(speeds[i], altitudes[i]; body=body) for i in 1:length(times)]
 
     return (
         times = times,
@@ -568,17 +549,9 @@ handles all unit conversions automatically.
 function trajectory_ode!(du, u, p, t)
     # Check if this is a dimensionless call (p has 4 elements including units_ref)
     if length(p) == 4
-        # Already dimensionless, pass through
         return trajectory_ode_dimensionless!(du, u, p, t)
     else
-        # Unitful call - needs conversion
-        # This path is mainly for backward compatibility with old tests
         launcher_config, payload_config, mission_profile = p
-        n_coils = launcher_config.num_coils
-
-        # Convert to dimensionless if needed
-        # Note: This assumes u and du are already properly set up
-        # In practice, users should use simulate_trajectory instead
         units_ref = (
             L = 1.0u"m",
             V = 1.0u"m/s",
@@ -630,12 +603,16 @@ Uses PeriodicCallback for compatibility with unitful time.
 """
 function create_logging_callback(log::TrajectoryLog, p_params)
     function log_state(integrator)
-        # Extract parameters (handle both old 10-param and new 13-param versions)
-        if length(p_params) >= 13
-            F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_Earth, vacuum_pressure_ratio, drag_reduction_method, d_capsule = p_params
+        # Extract parameters (handle both old 10-param and new 14-param versions)
+        if length(p_params) >= 14
+            F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body, vacuum_pressure_ratio, drag_reduction_method, d_capsule, body = p_params
+        elseif length(p_params) >= 13
+            F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body, vacuum_pressure_ratio, drag_reduction_method, d_capsule = p_params
+            body = EARTH
         else
-            F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_Earth = p_params
+            F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body = p_params
             vacuum_pressure_ratio = 1.0
+            body = EARTH
         end
 
         # Extract state from integrator
@@ -648,7 +625,7 @@ function create_logging_callback(log::TrajectoryLog, p_params)
         T = ustrip(u"K", u[7])
 
         # Strip units from parameters
-        R_Earth_m = ustrip(u"m", R_Earth)
+        R_body_m = ustrip(u"m", R_body)
         L_launcher_m = ustrip(u"m", L_launcher)
         F_avg_n = ustrip(u"N", F_avg)
         A_payload_m2 = ustrip(u"m^2", A_payload)
@@ -656,7 +633,7 @@ function create_logging_callback(log::TrajectoryLog, p_params)
 
         # Calculate derived quantities (all unitless now)
         r = norm(pos)
-        h = r - R_Earth_m
+        h = r - R_body_m
         launch_pos_m = SVector(ustrip(u"m", launch_pos[1]), ustrip(u"m", launch_pos[2]), ustrip(u"m", launch_pos[3]))
         x_launcher = norm(pos - launch_pos_m)
         speed = norm(vel)
@@ -670,13 +647,12 @@ function create_logging_callback(log::TrajectoryLog, p_params)
         end
 
         # Drag
-        if h < 100000.0
+        if has_atmosphere(body) && h < 100000.0
             ρ_0 = 1.225
             H = 8500.0
             h_clamped = max(h, 0.0)
             ρ = ρ_0 * exp(-h_clamped / H)
 
-            # Apply vacuum reduction if inside launcher
             if x_launcher < L_launcher_m
                 ρ = ρ * vacuum_pressure_ratio
             end
@@ -692,21 +668,25 @@ function create_logging_callback(log::TrajectoryLog, p_params)
         end
 
         # Gravity
-        μ = 3.986004418e14
+        μ_val = ustrip(u"m^3/s^2", body.mu)
         if r > 0.0
-            a_grav = -μ / r^3 * pos
+            a_grav = -μ_val / r^3 * pos
             F_grav = m_payload_kg * a_grav
         else
             F_grav = SVector(0.0, 0.0, 0.0)
         end
 
         # Calculate Mach number for logging
-        γ = 1.4
-        R_gas = 287.0
-        T_amb = 288.15 - 6.5e-3 * h
-        T_amb = max(T_amb, 216.65)
-        a_sound = sqrt(γ * R_gas * T_amb)
-        mach = speed / a_sound
+        if has_atmosphere(body)
+            γ = 1.4
+            R_gas = 287.0
+            T_amb = 288.15 - 6.5e-3 * h
+            T_amb = max(T_amb, 216.65)
+            a_sound = sqrt(γ * R_gas * T_amb)
+            mach = speed / a_sound
+        else
+            mach = 0.0
+        end
 
         # Log everything with units restored
         t_val = ustrip(u"s", t)
@@ -726,7 +706,6 @@ function create_logging_callback(log::TrajectoryLog, p_params)
     end
 
     # Use PeriodicCallback instead of PresetTimeCallback for unitful time compatibility
-    # Log every 0.1 seconds
     return PeriodicCallback(log_state, 0.1u"s")
 end
 
@@ -738,38 +717,31 @@ Much more stable for SDE/Monte Carlo simulations than full RLC model.
 
 ## State Vector
 u = [x, y, z, vx, vy, vz, T] (7 variables)
-- Position: [x, y, z] in meters (Earth-centered inertial frame)
+- Position: [x, y, z] in meters (body-centered inertial frame)
 - Velocity: [vx, vy, vz] in m/s
 - Temperature: T in Kelvin
 
-## Parameters
-p = (F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_Earth)
-- F_avg: Average EM force [N]
-- L_launcher: Launcher tube length [m]
-- launch_dir: Unit vector pointing in launch direction
-- m_payload: Payload mass [kg]
-- A_payload: Cross-sectional area [m²]
-- c_p: Specific heat capacity [J/(kg·K)]
-- ε: Emissivity [dimensionless, 0-1]
-- R_nose: Nose radius [m]
-- launch_pos: Initial position vector [m]
-- R_Earth: Earth radius [m]
+## Parameters (14 elements)
+p = (F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body, vacuum_pressure_ratio, drag_reduction_method, d_capsule, body)
 
 ## Physics
 Implements simplified point-mass dynamics:
 1. Constant electromagnetic force (inside launcher only)
-2. Exponential atmosphere drag
+2. Exponential atmosphere drag (zero for vacuum bodies)
 3. Point-mass gravity (two-body problem)
-4. Aerodynamic heating (Sutton-Graves formula)
-
-# TODO: Add unit enforcement with Unitful
-# TODO: Add energy conservation checking
+4. Aerodynamic heating (zero for vacuum bodies)
 """
 function trajectory_ode_simplified!(du, u, p, t)
     # =================================================================
     # UNPACK PARAMETERS
     # =================================================================
-    F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_Earth, vacuum_pressure_ratio, drag_reduction_method, d_capsule = p
+    if length(p) >= 14
+        F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body, vacuum_pressure_ratio, drag_reduction_method, d_capsule, body = p
+    else
+        # Backward compatibility: 13-element tuple defaults to EARTH
+        F_avg, L_launcher, launch_dir, m_payload, A_payload, c_p, ε, R_nose, launch_pos, R_body, vacuum_pressure_ratio, drag_reduction_method, d_capsule = p
+        body = EARTH
+    end
 
     # =================================================================
     # EXTRACT STATE
@@ -781,8 +753,8 @@ function trajectory_ode_simplified!(du, u, p, t)
     # =================================================================
     # DERIVED QUANTITIES
     # =================================================================
-    r = norm(pos)                     # Distance from Earth center [m]
-    h = r - R_Earth                   # Altitude above surface [m]
+    r = norm(pos)                     # Distance from body center [m]
+    h = r - R_body                    # Altitude above surface [m]
     x_launcher = norm(pos - launch_pos)  # Distance along launcher [m]
     v_mag = norm(vel)                 # Speed [m/s]
 
@@ -794,9 +766,6 @@ function trajectory_ode_simplified!(du, u, p, t)
     # =================================================================
     # ELECTROMAGNETIC FORCE
     # =================================================================
-    # Physics: F_em = constant force while x < L_launcher
-    # This is a simplified model; real coilgun has position-dependent force
-    # See em_acceleration.jl for detailed electromagnetic theory
     if x_launcher < L_launcher
         F_em = F_avg * launch_dir  # [N]
     else
@@ -806,176 +775,104 @@ function trajectory_ode_simplified!(du, u, p, t)
     # =================================================================
     # ATMOSPHERIC DRAG FORCE
     # =================================================================
-    # Physics: Exponential atmosphere model
-    #   ρ(h) = ρ₀ exp(-h/H)
-    # where:
-    #   ρ₀ = 1.225 kg/m³  (sea level density)
-    #   H = 8500 m         (scale height)
-    #
-    # Drag equation:
-    #   F_drag = -½ ρ C_d A v² (v̂)
-    # where:
-    #   C_d = drag coefficient (0.5 for streamlined projectile)
-    #   A = cross-sectional area [m²]
-    #   v̂ = velocity direction (unit vector)
-    #
-    if h < 100000.0u"m"  # Only apply drag below 100 km
-        ρ_0 = 1.225u"kg/m^3"      # Sea level density
-        H = 8500.0u"m"             # Atmospheric scale height
-        # Clamp altitude to 0 if below sea level (don't model underground)
+    if has_atmosphere(body) && h < 100000.0u"m"
+        ρ_0 = 1.225u"kg/m^3"
+        H = 8500.0u"m"
         h_clamped = max(h, 0.0u"m")
-        ρ = ρ_0 * exp(-ustrip(u"m", h_clamped) / ustrip(u"m", H))  # Exponential atmosphere
+        ρ = ρ_0 * exp(-ustrip(u"m", h_clamped) / ustrip(u"m", H))
 
-        # Apply vacuum tube pressure reduction while inside launcher
         if x_launcher < L_launcher
-            ρ = ρ * vacuum_pressure_ratio  # Reduced density in vacuum tube
+            ρ = ρ * vacuum_pressure_ratio
         end
 
         @assert ρ >= 0.0u"kg/m^3" "Atmospheric density must be non-negative"
         @assert ρ <= ρ_0 "Atmospheric density should not exceed sea level value (accounting for vacuum reduction)"
 
-        # Base drag coefficient (streamlined body)
-        C_d_base = 0.5  # Dimensionless
-
-        # Calculate Mach number for drag reduction
-        # Speed of sound: a = √(γ R T) where γ=1.4, R=287 J/(kg·K)
-        γ = 1.4  # Dimensionless
-        R_gas = 287.0u"J/(kg*K)"  # Specific gas constant for air
-        # Use ambient temperature from standard atmosphere
-        T_amb = 288.15u"K" - 6.5e-3u"K/m" * h_clamped  # Linear temperature lapse
-        T_amb = max(T_amb, 216.65u"K")  # Min temperature (tropopause)
+        C_d_base = 0.5
+        γ = 1.4
+        R_gas = 287.0u"J/(kg*K)"
+        T_amb = 288.15u"K" - 6.5e-3u"K/m" * h_clamped
+        T_amb = max(T_amb, 216.65u"K")
         a_sound = sqrt(γ * R_gas * T_amb)
-        mach = v_mag / a_sound  # Dimensionless
+        mach = v_mag / a_sound
 
-        # Apply passive drag reduction based on Mach number and altitude
-        # Strip units for drag reduction factor calculation (it's empirical)
         C_d = effective_drag_coefficient(C_d_base, drag_reduction_method, ustrip(mach), ustrip(u"m", h_clamped))
 
         if v_mag > 0.0u"m/s"
-            # Drag force opposes velocity: F_drag = -½ ρ C_d A v² v̂
-            F_drag = -0.5 * ρ * C_d * A_payload * v_mag^2 * (vel / v_mag)  # [N]
+            F_drag = -0.5 * ρ * C_d * A_payload * v_mag^2 * (vel / v_mag)
         else
             F_drag = SVector(0.0u"N", 0.0u"N", 0.0u"N")
         end
     else
-        F_drag = SVector(0.0u"N", 0.0u"N", 0.0u"N")  # No drag in space
+        F_drag = SVector(0.0u"N", 0.0u"N", 0.0u"N")
     end
 
     # =================================================================
     # GRAVITATIONAL FORCE
     # =================================================================
-    # Physics: Newton's law of gravitation (two-body, point mass)
-    #   F_grav = -GMm/r² r̂ = -μm/r² r̂
-    # where:
-    #   G = gravitational constant
-    #   M = Earth mass
-    #   μ = GM = 3.986004418×10¹⁴ m³/s² (Earth's gravitational parameter)
-    #   r̂ = r/|r| (unit vector)
-    #
-    # This simplifies to:
-    #   a_grav = -μ/r³ r
-    #
-    # TODO: Add J2 perturbation for more accuracy (see gravity.jl)
-    μ = 3.986004418e14u"m^3/s^2"  # Earth's gravitational parameter
+    μ = body.mu
 
     if r > 0.0u"m"
-        # Gravitational acceleration: a = -μ/r³ r
-        a_grav = -μ / r^3 * pos  # [m/s²]
+        a_grav = -μ / r^3 * pos
 
-        # Sanity check: gravity should be ~9.8 m/s² at surface
+        # Sanity check: gravity should be near body's surface gravity
         g_mag = norm(a_grav)
-        if h < 10000.0u"m"  # Within 10 km of surface
-            @assert g_mag > 9.0u"m/s^2" && g_mag < 11.0u"m/s^2" "Gravity unreasonable near surface (g=$g_mag)"
+        if h < 10000.0u"m"
+            g_surface = body.surface_gravity
+            @assert g_mag > 0.8 * g_surface && g_mag < 1.2 * g_surface "Gravity unreasonable near surface (g=$g_mag, expected ~$g_surface)"
         end
     else
         a_grav = SVector(0.0u"m/s^2", 0.0u"m/s^2", 0.0u"m/s^2")
     end
 
-    F_grav = m_payload * a_grav  # [N]
+    F_grav = m_payload * a_grav
 
     # =================================================================
     # TOTAL FORCE AND ACCELERATION
     # =================================================================
-    # Newton's second law: F = ma  =>  a = F/m
-    F_total = F_em + F_drag + F_grav  # [N]
-    a_total = F_total / m_payload      # [m/s²]
+    F_total = F_em + F_drag + F_grav
+    a_total = F_total / m_payload
 
-    # Sanity check on total acceleration
-    # Allow up to 20,000,000 m/s² (~2,000,000 g) for extreme launcher configurations
-    # (LEO-capable launchers with very high exit velocities and short tracks need these high accelerations)
     a_mag = norm(a_total)
     @assert a_mag < 20000000.0u"m/s^2" "Acceleration unreasonably high (a=$a_mag)"
 
     # =================================================================
     # AERODYNAMIC HEATING
     # =================================================================
-    # Physics: Sutton-Graves formula for stagnation point heat flux
-    #   q̇ = K √(ρ/R_nose) v³
-    # where:
-    #   K = 1.83×10⁻⁴ (empirical constant)
-    #   ρ = atmospheric density [kg/m³]
-    #   R_nose = nose radius [m]
-    #   v = velocity [m/s]
-    #
-    # Radiative cooling (Stefan-Boltzmann law):
-    #   q_rad = ε σ A (T⁴ - T_amb⁴)
-    # where:
-    #   ε = emissivity
-    #   σ = 5.67×10⁻⁸ W/(m²·K⁴) (Stefan-Boltzmann constant)
-    #   A = surface area [m²]
-    #   T_amb = ambient temperature [K]
-    #
-    # Energy balance:
-    #   m c_p dT/dt = q_heating - q_cooling
-    #
-    # TODO: Add conduction to internal structure
-    # TODO: Use more sophisticated heating model for subsonic/transonic
-    if h < 100000.0u"m" && v_mag > 100.0u"m/s"  # Only heat in atmosphere at high speed
+    if has_atmosphere(body) && h < 100000.0u"m" && v_mag > 100.0u"m/s"
         ρ_0 = 1.225u"kg/m^3"
         H = 8500.0u"m"
-        ρ = ρ_0 * exp(-ustrip(u"m", h) / ustrip(u"m", H))  # [kg/m³]
+        ρ = ρ_0 * exp(-ustrip(u"m", h) / ustrip(u"m", H))
 
-        # Apply vacuum tube pressure reduction while inside launcher
         if x_launcher < L_launcher
-            ρ = ρ * vacuum_pressure_ratio  # Reduced heating in vacuum tube
+            ρ = ρ * vacuum_pressure_ratio
         end
 
-        # Sutton-Graves heating
-        K = 1.83e-4u"kg^0.5/m"  # Empirical constant
-        q_dot = K * sqrt(ρ / R_nose) * v_mag^3  # [W/m²] Heat flux
+        K = 1.83e-4u"kg^0.5/m"
+        q_dot = K * sqrt(ρ / R_nose) * v_mag^3
 
-        # Radiative cooling
-        σ = 5.670374419e-8u"W/(m^2*K^4)"  # Stefan-Boltzmann constant
-        T_amb = 250.0u"K"       # Ambient temperature (high altitude)
+        σ = 5.670374419e-8u"W/(m^2*K^4)"
+        T_amb = 250.0u"K"
 
         @assert T >= T_amb "Payload cooler than ambient?"
 
-        q_radiation = ε * σ * A_payload * (T^4 - T_amb^4)  # [W] Radiated power
-
-        # Net heating rate
-        q_net = q_dot * A_payload - q_radiation  # [W]
-
-        # Temperature rate of change
-        dT_dt = q_net / (m_payload * c_p)  # [K/s]
+        q_radiation = ε * σ * A_payload * (T^4 - T_amb^4)
+        q_net = q_dot * A_payload - q_radiation
+        dT_dt = q_net / (m_payload * c_p)
     else
-        dT_dt = 0.0u"K/s"  # No heating in space or at low speeds
+        dT_dt = 0.0u"K/s"
     end
 
     # =================================================================
     # ASSEMBLE DERIVATIVE VECTOR
     # =================================================================
-    # State equations:
-    #   dr/dt = v           (position derivative is velocity)
-    #   dv/dt = a = F/m     (velocity derivative is acceleration)
-    #   dT/dt = q_net/(mc_p) (temperature derivative from energy balance)
-
-    du[1] = vel[1]      # dx/dt = vx [m/s]
-    du[2] = vel[2]      # dy/dt = vy [m/s]
-    du[3] = vel[3]      # dz/dt = vz [m/s]
-    du[4] = a_total[1]  # dvx/dt = ax [m/s²]
-    du[5] = a_total[2]  # dvy/dt = ay [m/s²]
-    du[6] = a_total[3]  # dvz/dt = az [m/s²]
-    du[7] = dT_dt       # dT/dt [K/s]
+    du[1] = vel[1]
+    du[2] = vel[2]
+    du[3] = vel[3]
+    du[4] = a_total[1]
+    du[5] = a_total[2]
+    du[6] = a_total[3]
+    du[7] = dT_dt
 
     return nothing
 end
@@ -991,13 +888,12 @@ Returns: SDEProblem ready to solve, TrajectoryLog for recording data
 function create_simplified_sde_problem(
     v_target, L_launcher, m_payload, elevation, azimuth;
     tspan=(0.0u"s", 180.0u"s"), noise_level=0.05, enable_logging=false, vacuum_pressure_ratio=1.0,
-    drag_reduction_method=NoDragReduction(), capsule_diameter=0.4u"m"
+    drag_reduction_method=NoDragReduction(), capsule_diameter=0.4u"m", body=EARTH
 )
-    # Keep all quantities with units!
     v = v_target
     L = L_launcher
     m_base = m_payload
-    θ_elev = ustrip(u"rad", elevation)  # Convert to radians (dimensionless for trig)
+    θ_elev = ustrip(u"rad", elevation)
     θ_azim = ustrip(u"rad", azimuth)
     d_capsule = capsule_diameter
 
@@ -1009,13 +905,13 @@ function create_simplified_sde_problem(
     a_avg = v^2 / (2 * L)
     F_avg = m * a_avg
 
-    # Earth parameters
-    R_E = 6.3781370e6u"m"
+    # Body radius
+    R = body.radius
 
     # Initial position
-    launch_pos = SVector(R_E, 0.0u"m", 0.0u"m")
+    launch_pos = SVector(R, 0.0u"m", 0.0u"m")
 
-    # Launch direction (proper local coordinates) - dimensionless unit vectors
+    # Launch direction (proper local coordinates)
     radial_dir = SVector(1.0, 0.0, 0.0)
     east_dir = SVector(0.0, 1.0, 0.0)
     north_dir = SVector(0.0, 0.0, 1.0)
@@ -1031,69 +927,30 @@ function create_simplified_sde_problem(
     # Payload parameters (with units!)
     A_payload = 0.1u"m^2"
     c_p = 900.0u"J/(kg*K)"
-    ε = 0.8  # Dimensionless emissivity
+    ε = 0.8
     R_nose = 0.1u"m"
 
-    # Parameters tuple (includes drag reduction method and capsule diameter)
-    p = (F_avg, L, launch_dir, m, A_payload, c_p, ε, R_nose, launch_pos, R_E, vacuum_pressure_ratio, drag_reduction_method, d_capsule)
+    # Parameters tuple (14 elements, includes body)
+    p = (F_avg, L, launch_dir, m, A_payload, c_p, ε, R_nose, launch_pos, R, vacuum_pressure_ratio, drag_reduction_method, d_capsule, body)
 
-    # Noise function for SDE (handle units correctly)
-    # In SDEs: du = f(u,p,t)*dt + g(u,p,t)*dW where dW ~ N(0, dt)
-    #
-    # **With UNITFUL time** (dt has units s):
-    #   dW has units sqrt(s), so g must have units [state]/sqrt(s)
-    #   e.g., position noise: m/s^0.5
-    #
-    # **With UNITLESS time** (dt is Float64 seconds):
-    #   dW is unitless, so g must have units [state]
-    #   e.g., position noise: m
-    #
-    # This function works for UNITLESS time (compatible with SDE solvers)
     function noise!(du, u, p, t)
-        # Position noise: meters (when time is unitless)
         du[1:3] .= 1.0u"m"
-
-        # Velocity noise scales with current velocity
         v_mag = sqrt(u[4]^2 + u[5]^2 + u[6]^2)
         v_noise = max(1.0u"m/s", v_mag * noise_level)
         du[4:6] .= v_noise
-
-        # Temperature noise: Kelvin
         du[7] = 1.0u"K"
         return nothing
     end
 
-    # Time span (already has units)
     t0 = tspan[1]
     tf = tspan[2]
 
-    # Create logging if requested
     log = enable_logging ? TrajectoryLog() : nothing
     callback = enable_logging ? create_logging_callback(log, p) : nothing
 
-    # Create appropriate problem type based on noise_level
-    # IMPORTANT: For unitful state vectors with mixed dimensions (m, m/s, K):
-    #
-    # **ODE solvers (deterministic, noise_level=0.0)**:
-    #   - Use fixed-step solvers: Euler(), RK4() with dt in seconds (e.g., dt=0.01u"s")
-    #   - Do NOT use saveat (interpolation fails with mixed units)
-    #   - Do NOT use callbacks with preset times (unitful time incompatibility)
-    #   - Recommended: solve(prob, Euler(), dt=0.01u"s", adaptive=false, dense=false)
-    #
-    # **SDE solvers (stochastic, noise_level>0.0)**:
-    #   - SDE solvers have limited unitful support due to sqrt(dt) operations
-    #   - TIME must be unitless but STATE remains unitful
-    #   - Use ustrip(u"s", tspan) for time, keep u0 unitful
-    #   - Recommended: solve(prob, EM(), dt=0.01, adaptive=false, dense=false)
-    #
-    # For this function: Problem created with unitful time for ODE compatibility.
-    # For SDE: User should convert time to unitless before solving.
-
     if noise_level == 0.0
-        # Deterministic case: create ODE problem
         prob = ODEProblem(trajectory_ode_simplified!, u0, (t0, tf), p)
     else
-        # Stochastic case: create SDE problem
         prob = SDEProblem(trajectory_ode_simplified!, noise!, u0, (t0, tf), p)
     end
 

@@ -1,8 +1,11 @@
 services:
   emlaunch:
-    build: .
+    build:
+      context: .
+      shm_size: '512m'
     image: emlaunch:latest
     container_name: emlaunch-notebook
+    shm_size: '512m'
     ports:
       - "8888:8888"
     volumes:

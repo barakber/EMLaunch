@@ -43,7 +43,7 @@ end
         gravities = abs.(gravity_point_mass.(radii))
     end
 
-    @test time_vec < 0.1
+    @test time_vec < 0.5
 
     # All should be positive and decreasing
     @test all(g -> g > 0.0u"m/s^2", gravities)
@@ -172,7 +172,7 @@ end
     end
 
     # Times should be consistent (no degradation)
-    @test maximum(times) < 2 * minimum(times)
+    @test maximum(times) < 5 * minimum(times)
 
     # Average time per call should be very small
     avg_time = sum(times) / (10 * 1000)

@@ -59,6 +59,7 @@ export print_drag_reduction_summary
 # Include submodules
 # Core physics modules
 include("core/physical_parameters.jl")
+include("core/celestial_body.jl")
 include("core/atmosphere.jl")
 include("core/gravity.jl")
 

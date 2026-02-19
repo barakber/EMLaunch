@@ -179,7 +179,7 @@ function create_sde_problem(launcher, payload, mission, noise_params=default_noi
 end
 
 """
-    monte_carlo_analysis(launcher, payload, mission, n_runs=100; noise_params=default_noise_parameters())
+    monte_carlo_analysis(launcher, payload, mission, n_runs=10; noise_params=default_noise_parameters())
 
 Run Monte Carlo analysis to compute trajectory distributions.
 
@@ -193,7 +193,7 @@ Performs multiple stochastic simulations and computes statistics:
 - `launcher`: LauncherConfig
 - `payload`: PayloadConfig
 - `mission`: MissionProfile
-- `n_runs`: Number of Monte Carlo runs (default: 100)
+- `n_runs`: Number of Monte Carlo runs (default: 10)
 - `noise_params`: NoiseParameters (optional)
 
 # Returns
@@ -205,35 +205,37 @@ Named tuple with:
 - `confidence_intervals`: 68%, 95%, 99% bounds
 """
 function monte_carlo_analysis(
-    launcher, payload, mission, n_runs=100;
-    noise_params=default_noise_parameters()
+    launcher, payload, mission, n_runs=10;
+    noise_params=default_noise_parameters(),
+    tspan=(0.0u"s", 10.0u"s")
 )
     @info "Running Monte Carlo analysis" n_runs=n_runs
     @info "Noise parameters" atmospheric="±$(noise_params.atmospheric_noise*100)%" drag="±$(noise_params.drag_noise*100)%" current="±$(noise_params.current_noise*100)%" timing="±$(noise_params.timing_noise)" mass="±$(noise_params.mass_noise*100)%"
 
     # Create SDE problem
-    prob = create_sde_problem(launcher, payload, mission, noise_params)
+    prob = create_sde_problem(launcher, payload, mission, noise_params; tspan=tspan)
 
-    # Create ensemble problem for Monte Carlo
-    ensemble_prob = EnsembleProblem(prob)
-
-    # Create progress bar
+    # Create progress bar and thread-safe counter
     prog = Progress(n_runs, dt=0.5, desc="Solving SDE trajectories: ", barlen=50)
+    completed = Threads.Atomic{Int}(0)
 
-    # Create callback to update progress
-    function prob_func(prob, i, repeat)
+    # output_func fires after each trajectory completes (not before like prob_func)
+    function output_func(sol, i)
+        Threads.atomic_add!(completed, 1)
         next!(prog)
-        prob
+        (sol, false)
     end
 
-    # Recreate ensemble with progress callback
-    ensemble_prob = EnsembleProblem(prob, prob_func=prob_func)
+    # Create ensemble problem with completion tracking
+    ensemble_prob = EnsembleProblem(prob, output_func=output_func)
 
-    # Solve ensemble with parallel threading
+    # Solve ensemble - use EM() instead of SRIW1() because SRIW1 has O(n²) cost
+    # per step in noise dimensions, which is ~1M ops/step for 1007-dim state vector.
+    # EM (Euler-Maruyama) is O(n) and sufficient for Monte Carlo statistics.
     @info "Solving SDE trajectories" n_runs=n_runs
-    sol = solve(ensemble_prob, SRIW1(), EnsembleThreads(), trajectories=n_runs,
-                adaptive=true, dt=0.001, saveat=0.1,
-                maxiters=1e7, verbose=false)
+    sol = solve(ensemble_prob, EM(), EnsembleThreads(), trajectories=n_runs,
+                dt=0.001, saveat=0.1,
+                maxiters=1e6, verbose=false)
 
     finish!(prog)
     @info "Ensemble solve complete"

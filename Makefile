@@ -1,4 +1,4 @@
-.PHONY: test help clean install notebooks
+.PHONY: test help clean install notebooks compose-up
 
 # Default target
 help:
@@ -9,15 +9,19 @@ help:
 	@echo "  make test      - Run the test suite"
 	@echo "  make install   - Install package dependencies"
 	@echo "  make clean     - Clean up generated files"
+	@echo "  make compose-up - Rebuild and start Docker container"
 	@echo "  make help      - Show this help message"
 
 # Start Jupyter notebook server (via Julia's IJulia)
 notebooks:
-	@echo "Starting Jupyter notebook server via IJulia..."
+	@echo "Precompiling EMLaunch and dependencies..."
+	julia --project=. -e 'using Pkg; Pkg.precompile()'
+	@echo ""
+	@echo "Starting JupyterLab via IJulia..."
 	@echo "This ensures the Julia kernel is properly configured"
 	@echo "Press Ctrl+C to stop the server"
 	@echo ""
-	julia --project=. -e 'using IJulia; notebook(dir="notebooks")'
+	julia --project=. -e 'using IJulia; jupyterlab(dir="notebooks")'
 
 # Run tests
 test:
@@ -26,6 +30,10 @@ test:
 # Install dependencies
 install:
 	julia --project=. -e 'using Pkg; Pkg.instantiate()'
+
+# Rebuild and start Docker container
+compose-up:
+	docker-compose up --build
 
 # Clean generated files
 clean:

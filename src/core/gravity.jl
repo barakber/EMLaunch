@@ -1,8 +1,9 @@
 """
 # Gravity Module
 
-Models gravitational acceleration including Earth's oblateness (J2 perturbation)
+Models gravitational acceleration including oblateness (J2 perturbation)
 and other effects important for launch trajectory simulation.
+Supports multiple celestial bodies via the `body` keyword argument.
 
 ## Point Mass Gravity
 
@@ -13,26 +14,20 @@ Simple inverse-square law:
 
 where:
 - `μ = GM` = gravitational parameter [m³/s²]
-- `r` = distance from Earth center [m]
-- `r̂` = unit vector pointing from Earth center to object
+- `r` = distance from body center [m]
+- `r̂` = unit vector pointing from body center to object
 
-## J2 Perturbation (Earth Oblateness)
+## J2 Perturbation (Oblateness)
 
-Earth is not a perfect sphere - it's oblate (flattened at poles).
-The J2 term accounts for this:
+The J2 term accounts for oblateness:
 
 ```math
-\\vec{a}_{J2} = \\frac{3\\mu J_2 R_E^2}{2r^4} \\left[
+\\vec{a}_{J2} = \\frac{3\\mu J_2 R^2}{2r^4} \\left[
 \\left(5\\frac{z^2}{r^2} - 1\\right)\\hat{x} +
 \\left(5\\frac{z^2}{r^2} - 1\\right)\\hat{y} +
 \\left(5\\frac{z^2}{r^2} - 3\\right)\\hat{z}
 \\right]
 ```
-
-where:
-- `J₂ ≈ 1.08263×10⁻³` = oblateness coefficient
-- `R_E` = Earth equatorial radius [m]
-- `z` = distance along rotation axis [m]
 
 ## Total Gravitational Acceleration
 
@@ -46,7 +41,7 @@ using LinearAlgebra
 using StaticArrays
 
 """
-    gravity_point_mass(position)
+    gravity_point_mass(position; body=EARTH)
 
 Calculate gravitational acceleration using point mass model.
 
@@ -55,13 +50,14 @@ Calculate gravitational acceleration using point mass model.
 ```
 
 # Arguments
-- `position`: Position vector from Earth center [m] (3D vector or scalar radius)
+- `position`: Position vector from body center [m] (3D vector or scalar radius)
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Gravitational acceleration [m/s²] (3D vector or scalar)
 """
-function gravity_point_mass(position)
-    μ = 3.986004418e14u"m^3/s^2"  # Earth gravitational parameter
+function gravity_point_mass(position; body=EARTH)
+    μ = body.mu
 
     if isa(position, Number)
         # Scalar radius - return scalar acceleration magnitude
@@ -78,21 +74,21 @@ function gravity_point_mass(position)
 end
 
 """
-    gravity_with_J2(position)
+    gravity_with_J2(position; body=EARTH)
 
 Calculate gravitational acceleration including J2 oblateness perturbation.
 
 # Arguments
-- `position`: Position vector [x, y, z] from Earth center [m]
-              Coordinates in Earth-Centered Inertial (ECI) frame
+- `position`: Position vector [x, y, z] from body center [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Total gravitational acceleration vector [m/s²]
 """
-function gravity_with_J2(position)
-    μ = 3.986004418e14u"m^3/s^2"
-    J2 = 1.08263e-3  # dimensionless
-    R_E = 6.3781370e6u"m"
+function gravity_with_J2(position; body=EARTH)
+    μ = body.mu
+    J2 = body.J2
+    R = body.radius
 
     # Position components
     x, y, z = position[1], position[2], position[3]
@@ -102,7 +98,7 @@ function gravity_with_J2(position)
     a_point = -μ / r^3 * position
 
     # J2 perturbation
-    factor = (3 * μ * J2 * R_E^2) / (2 * r^5)  # Divide by r^5, not r^4
+    factor = (3 * μ * J2 * R^2) / (2 * r^5)  # Divide by r^5, not r^4
 
     z2_r2 = (z / r)^2
 
@@ -116,18 +112,19 @@ function gravity_with_J2(position)
 end
 
 """
-    altitude_from_position(position)
+    altitude_from_position(position; body=EARTH)
 
-Calculate altitude above Earth's surface from position vector.
+Calculate altitude above body's surface from position vector.
 
 # Arguments
-- `position`: Position vector from Earth center [m]
+- `position`: Position vector from body center [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Altitude above surface [m]
 """
-function altitude_from_position(position)
-    R_E = 6.3781370e6u"m"
+function altitude_from_position(position; body=EARTH)
+    R = body.radius
 
     if isa(position, Number)
         r = position
@@ -135,27 +132,28 @@ function altitude_from_position(position)
         r = norm(position)
     end
 
-    return r - R_E
+    return r - R
 end
 
 """
-    position_from_altitude_angle(altitude, latitude, longitude)
+    position_from_altitude_angle(altitude, latitude, longitude; body=EARTH)
 
 Calculate ECI position vector from altitude and geographic coordinates.
 
-Simplified model assuming spherical Earth and ignoring Earth rotation effects
+Simplified model assuming spherical body and ignoring rotation effects
 for initial position calculation.
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
 - `latitude`: Geodetic latitude [degrees or radians]
 - `longitude`: Geodetic longitude [degrees or radians]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
-- Position vector [x, y, z] in ECI frame [m]
+- Position vector [x, y, z] in body-centered inertial frame [m]
 """
-function position_from_altitude_angle(altitude, latitude, longitude)
-    R_E = 6.3781370e6u"m"
+function position_from_altitude_angle(altitude, latitude, longitude; body=EARTH)
+    R = body.radius
 
     # Convert to radians if necessary
     if unit(latitude) == u"°"
@@ -170,10 +168,10 @@ function position_from_altitude_angle(altitude, latitude, longitude)
         lon_rad = ustrip(longitude)
     end
 
-    # Radius from Earth center
-    r = R_E + altitude
+    # Radius from body center
+    r = R + altitude
 
-    # Convert to Cartesian (simplified spherical Earth)
+    # Convert to Cartesian (simplified spherical body)
     x = r * cos(lat_rad) * cos(lon_rad)
     y = r * cos(lat_rad) * sin(lon_rad)
     z = r * sin(lat_rad)
@@ -182,7 +180,7 @@ function position_from_altitude_angle(altitude, latitude, longitude)
 end
 
 """
-    escape_velocity(altitude)
+    escape_velocity(altitude; body=EARTH)
 
 Calculate escape velocity at given altitude.
 
@@ -191,16 +189,17 @@ v_{esc} = \\sqrt{\\frac{2\\mu}{r}}
 ```
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Escape velocity [m/s]
 """
-function escape_velocity(altitude)
-    μ = 3.986004418e14u"m^3/s^2"
-    R_E = 6.3781370e6u"m"
+function escape_velocity(altitude; body=EARTH)
+    μ = body.mu
+    R = body.radius
 
-    r = R_E + altitude
+    r = R + altitude
 
     v_esc = sqrt(2 * μ / r)
 
@@ -208,7 +207,7 @@ function escape_velocity(altitude)
 end
 
 """
-    orbital_velocity(altitude)
+    orbital_velocity(altitude; body=EARTH)
 
 Calculate circular orbital velocity at given altitude.
 
@@ -217,16 +216,17 @@ v_{orb} = \\sqrt{\\frac{\\mu}{r}}
 ```
 
 # Arguments
-- `altitude`: Altitude above sea level [m]
+- `altitude`: Altitude above surface [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Circular orbital velocity [m/s]
 """
-function orbital_velocity(altitude)
-    μ = 3.986004418e14u"m^3/s^2"
-    R_E = 6.3781370e6u"m"
+function orbital_velocity(altitude; body=EARTH)
+    μ = body.mu
+    R = body.radius
 
-    r = R_E + altitude
+    r = R + altitude
 
     v_orb = sqrt(μ / r)
 
@@ -234,7 +234,7 @@ function orbital_velocity(altitude)
 end
 
 """
-    specific_orbital_energy(velocity, position)
+    specific_orbital_energy(velocity, position; body=EARTH)
 
 Calculate specific orbital energy (energy per unit mass).
 
@@ -244,13 +244,14 @@ Calculate specific orbital energy (energy per unit mass).
 
 # Arguments
 - `velocity`: Velocity magnitude or vector [m/s]
-- `position`: Distance from Earth center or position vector [m]
+- `position`: Distance from body center or position vector [m]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Specific orbital energy [J/kg] or [m²/s²]
 """
-function specific_orbital_energy(velocity, position)
-    μ = 3.986004418e14u"m^3/s^2"
+function specific_orbital_energy(velocity, position; body=EARTH)
+    μ = body.mu
 
     v = isa(velocity, Number) ? velocity : norm(velocity)
     r = isa(position, Number) ? position : norm(position)
@@ -261,7 +262,7 @@ function specific_orbital_energy(velocity, position)
 end
 
 """
-    orbital_elements(position, velocity)
+    orbital_elements(position, velocity; body=EARTH)
 
 Calculate classical orbital elements from state vectors.
 
@@ -276,12 +277,13 @@ Returns:
 # Arguments
 - `position`: Position vector [m]
 - `velocity`: Velocity vector [m/s]
+- `body`: CelestialBody (default: EARTH)
 
 # Returns
 - Named tuple with orbital elements
 """
-function orbital_elements(position, velocity)
-    μ = 3.986004418e14u"m^3/s^2"
+function orbital_elements(position, velocity; body=EARTH)
+    μ = body.mu
 
     # Position and velocity magnitudes
     r_vec = position
@@ -357,23 +359,24 @@ function orbital_elements(position, velocity)
 end
 
 """
-    print_orbital_info(position, velocity)
+    print_orbital_info(position, velocity; body=EARTH)
 
 Print human-readable orbital information.
 
 # Arguments
 - `position`: Position vector [m]
 - `velocity`: Velocity vector [m/s]
+- `body`: CelestialBody (default: EARTH)
 """
-function print_orbital_info(position, velocity)
-    elements = orbital_elements(position, velocity)
+function print_orbital_info(position, velocity; body=EARTH)
+    elements = orbital_elements(position, velocity; body=body)
     r = norm(position)
     v = norm(velocity)
-    h = altitude_from_position(position)
-    ε = specific_orbital_energy(velocity, position)
+    h = altitude_from_position(position; body=body)
+    ε = specific_orbital_energy(velocity, position; body=body)
 
     println("=" ^ 70)
-    println("ORBITAL INFORMATION")
+    println("ORBITAL INFORMATION ($(body.name))")
     println("=" ^ 70)
     println()
     println("STATE VECTORS:")
@@ -392,14 +395,15 @@ function print_orbital_info(position, velocity)
     println()
 
     # Orbit type
+    R = body.radius
     if elements.e < 1e-3
         println("  Orbit type:            Circular")
     elseif elements.e < 1.0
         println("  Orbit type:            Elliptical")
         r_p = elements.a * (1 - elements.e)
         r_a = elements.a * (1 + elements.e)
-        h_p = r_p - 6.3781370e6u"m"
-        h_a = r_a - 6.3781370e6u"m"
+        h_p = r_p - R
+        h_a = r_a - R
         println("  Periapsis altitude:    $(h_p)")
         println("  Apoapsis altitude:     $(h_a)")
     elseif elements.e ≈ 1.0
